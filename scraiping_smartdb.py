@@ -490,6 +490,78 @@ def wait_list_item_disappear(driver, target_text, timeout=15):
     return False
 
 
+def dump_diagnostic(driver, label, work_item_xpath=None):
+    """
+    失敗時の診断情報をログ出力し、スクリーンショットとHTMLソースを保存する
+
+    引数:
+        driver, 診断ラベル, 対象XPath(任意)
+
+    返り値:
+        なし
+    """
+    try:
+        url = driver.current_url
+    except Exception as e:
+        url = f"(取得失敗: {e})"
+
+    try:
+        title = driver.title
+    except Exception as e:
+        title = f"(取得失敗: {e})"
+
+    logger.error(f"[診断:{label}] current_url={url}")
+    logger.error(f"[診断:{label}] title={title}")
+
+    if work_item_xpath:
+        try:
+            count = len(driver.find_elements(By.XPATH, work_item_xpath))
+        except Exception as e:
+            count = f"(取得失敗: {e})"
+        logger.error(f"[診断:{label}] work_item_xpath マッチ件数={count}")
+
+    # ページ内テキスト抜粋
+    try:
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        excerpt = body_text[:500].replace("\n", " | ")
+        logger.error(f"[診断:{label}] ページテキスト抜粋: {excerpt}")
+    except Exception as e:
+        logger.error(f"[診断:{label}] ページテキスト取得失敗: {e}")
+
+    # ログイン画面に留まっているかの判別
+    try:
+        login_inputs = driver.find_elements(By.XPATH, "//input[@id='username']")
+        if login_inputs:
+            logger.error(f"[診断:{label}] ログイン画面に留まっています（ログイン処理が失敗している可能性）")
+        else:
+            logger.error(f"[診断:{label}] ログイン画面ではありません（ログインは通過済み）")
+    except Exception:
+        pass
+
+    # スクリーンショット保存
+    try:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        shot_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), f"debug_{label}_{ts}.png"
+        )
+        driver.save_screenshot(shot_path)
+        logger.error(f"[診断:{label}] スクリーンショット保存: {shot_path}")
+    except Exception as e:
+        logger.error(f"[診断:{label}] スクリーンショット保存失敗: {e}")
+
+    # HTMLソース保存
+    try:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        html_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), f"debug_{label}_{ts}.html"
+        )
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        logger.error(f"[診断:{label}] HTMLソース保存: {html_path}")
+    except Exception as e:
+        logger.error(f"[診断:{label}] HTMLソース保存失敗: {e}")
+
+
 # =========================
 # SmartDBスクレイピング本体
 # =========================
@@ -509,7 +581,11 @@ def scraiping_smartdb(driver, base_url):
     login_password_xpath = "//input[@data-testid='password-input']"
     login_submit_xpath = "//span[normalize-space()='パスワードでログイン']"
 
-    work_item_xpath = "//div[@role='button' and @tabindex='0' and @aria-disabled='false']"
+    # work_item_xpath = "//div[@role='button'][.//*[contains(@aria-label,'責任者承認①')]]"
+    work_item_xpath = (
+        "//div[@role='button' and contains(concat(' ', normalize-space(@class), ' '), ' MuiListItemButton-root ')]"
+        "[.//*[contains(normalize-space(.), '責任者承認①')]]"
+    )
     next_page_xpath = "//button[.//p[normalize-space()='次へ']]"
 
     pdf_link_xpath_candidates = [
@@ -540,9 +616,14 @@ def scraiping_smartdb(driver, base_url):
     set_text(driver, login_password_xpath, os.environ.get("SMART_DB_PASSWORD"), timeout=DEFAULT_TIMEOUT)
     click_xpath(driver, login_submit_xpath, timeout=DEFAULT_TIMEOUT)
 
-    WebDriverWait(driver, DEFAULT_TIMEOUT).until(
-        lambda d: len(d.find_elements(By.XPATH, work_item_xpath)) > 0
-    )
+    # ログイン後の一覧表示を待つ（タイムアウト時に診断情報を出力）
+    try:
+        WebDriverWait(driver, DEFAULT_TIMEOUT).until(
+            lambda d: len(d.find_elements(By.XPATH, work_item_xpath)) > 0
+        )
+    except TimeoutException:
+        dump_diagnostic(driver, "login_wait", work_item_xpath=work_item_xpath)
+        raise
 
     # =======================================
     # ============ 一覧ページ処理 ============
@@ -560,6 +641,7 @@ def scraiping_smartdb(driver, base_url):
                     lambda d: len(d.find_elements(By.XPATH, work_item_xpath)) > 0
                 )
             except TimeoutException:
+                dump_diagnostic(driver, "list_wait", work_item_xpath=work_item_xpath)
                 logger.info("一覧上の対象要素が見つからないため、このページの処理を終了します。")
                 break
 
@@ -574,7 +656,7 @@ def scraiping_smartdb(driver, base_url):
                 except StaleElementReferenceException:
                     continue
 
-                if "支払依頼" in element_text and element_text not in processed_on_page:
+                if "支払依頼" in element_text and "一覧" not in element_text and element_text not in processed_on_page:
                     target_element = element
                     target_text = element_text
                     break
@@ -690,18 +772,20 @@ def scraiping_smartdb(driver, base_url):
                     )
 
                 if consumption_tax != util.normalize_money(amount_tax):
-                    mismatch_flag = 1
-                    logger.warning(
-                        f"pdf消費税金額とhtml請求消費税額が不一致です(pdf:{consumption_tax} html:{amount_tax})"
-                    )
+                    if "日本アイ・ビー・エム" not in pdf_link_text:
+                        mismatch_flag = 1
+                        logger.warning(
+                            f"pdf消費税金額とhtml請求消費税額が不一致です(pdf:{consumption_tax} html:{amount_tax})"
+                        )
 
                 try:
                     if total_decluding_tax != util.normalize_money(amount_decluding):
-                        mismatch_flag = 1
-                        logger.warning(
-                            f"pdf税抜支払金額とhtml税抜支払金額が不一致です"
-                            f"(pdf:{total_decluding_tax} html:{amount_decluding})"
-                        )
+                        if "日本アイ・ビー・エム" not in pdf_link_text:
+                            mismatch_flag = 1
+                            logger.warning(
+                                f"pdf税抜支払金額とhtml税抜支払金額が不一致です"
+                                f"(pdf:{total_decluding_tax} html:{amount_decluding})"
+                            )
                 except TypeError:
                     mismatch_flag = 1
                     logger.warning(

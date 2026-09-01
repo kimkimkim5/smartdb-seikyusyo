@@ -442,27 +442,48 @@ def wait_new_pdf(download_dir: str, before_set: set, timeout: int = 60):
     """
     d = Path(download_dir)
     end = time.time() + timeout
+    last_size = {}
 
     while time.time() < end:
-        after = {p.name for p in d.glob("*.pdf")}
-        new = list(after - before_set)
+        try:
+            after = {p.name for p in d.glob("*.pdf")}
+        except OSError:
+            time.sleep(0.5)
+            continue
 
-        # 新規PDFが1つ見つかったら、それがダウンロード完了しているか確認
-        if len(new) == 1:
-            pdf_path = d / new[0]
+        new = sorted(after - before_set)
 
-            # まだダウンロード中なら同名の .crdownload が存在することが多い
-            crdownload_exists = (d / (new[0] + ".crdownload")).exists()
+        # 新規PDFが1つ以上見つかったら、ダウンロード完了しているか確認
+        if new:
+            # ダウンロード中ファイル(.crdownload/.tmp)が残っていないことを確認
+            partials = list(d.glob("*.crdownload")) + list(d.glob("*.tmp"))
 
-            # もしくはフォルダ内に *.crdownload が残っているかで判定してもOK
-            any_crdownload = any(d.glob("*.crdownload"))
+            if not partials:
+                # サイズが安定するまで待つ（DL中のサイズ変動を誤検知しない）
+                for name in new:
+                    p = d / name
+                    try:
+                        size = p.stat().st_size
+                    except OSError:
+                        continue
 
-            if (not crdownload_exists) and (not any_crdownload) and pdf_path.exists() and pdf_path.stat().st_size > 0:
-                return str(pdf_path)
+                    if size > 0 and last_size.get(name) == size:
+                        return str(p)
+
+                    last_size[name] = size
 
         time.sleep(0.5)
 
-    raise TimeoutError("新規PDFのダウンロード完了を検知できませんでした")
+    # タイムアウト時は監視先の一覧を例外メッセージに含めて自己診断できるようにする
+    try:
+        listing = [p.name for p in d.iterdir()]
+    except Exception as e:
+        listing = f"(一覧取得失敗: {e})"
+
+    raise TimeoutError(
+        f"新規PDFのダウンロード完了を検知できませんでした "
+        f"(監視先={download_dir} の一覧={listing})"
+    )
 
 
 def delete_file(path: str):
