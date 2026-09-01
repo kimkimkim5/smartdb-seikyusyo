@@ -571,7 +571,12 @@ def scraiping_smartdb(driver, base_url):
     SmartDBのスクレイピングをして情報(金額)を取得する処理
     """
 
-    download_dir = util.DOWNLOAD_DIR
+    # ★ プロジェクト直下の専用DLフォルダ（scraiping_data_create.py 側と同じパス）
+    download_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "downloads"
+    )
+    if not os.path.isdir(download_dir):
+        os.makedirs(download_dir, exist_ok=True)
 
     # ---------------------
     # XPath定義
@@ -628,10 +633,13 @@ def scraiping_smartdb(driver, base_url):
     # =======================================
     # ============ 一覧ページ処理 ============
     # =======================================
+    # ★ 全ページ共通の処理済みキー（ページ送りで先頭に戻っても再処理しない）
+    processed_all = set()
+
     for page_no in range(util.ITER_COUNT):
         logger.info(f"一覧ページ {page_no + 1} の処理を開始します。")
 
-        processed_on_page = set()
+        processed_this_page = 0  # このページで処理した件数（0件なら全件処理済みとみなして終了）
 
         while True:
             driver.switch_to.default_content()
@@ -656,7 +664,7 @@ def scraiping_smartdb(driver, base_url):
                 except StaleElementReferenceException:
                     continue
 
-                if "支払依頼" in element_text and "一覧" not in element_text and element_text not in processed_on_page:
+                if "支払依頼" in element_text and "一覧" not in element_text and element_text not in processed_all:
                     target_element = element
                     target_text = element_text
                     break
@@ -665,7 +673,8 @@ def scraiping_smartdb(driver, base_url):
                 logger.info("このページで未処理の『支払依頼』が見つからなかったため、次ページへ進みます。")
                 break
 
-            processed_on_page.add(target_text)
+            processed_all.add(target_text)
+            processed_this_page += 1
             logger.info(f"########## {target_text} 処理 START ##########")
 
             original_window = driver.current_window_handle
@@ -871,6 +880,11 @@ def scraiping_smartdb(driver, base_url):
                     logger.error(f"元ウィンドウへの復帰に失敗しました: {str(e)}")
 
             logger.info(f"########## {target_text} 処理 END ##########")
+
+        # ★ このページで1件も処理できなかった = 全案件を処理済み → 全体を終了
+        if processed_this_page == 0:
+            logger.info("全案件の処理が完了したため、処理を終了します。")
+            break
 
         # ----- iframeから抜ける（親画面に戻る） -----
         driver.switch_to.default_content()
