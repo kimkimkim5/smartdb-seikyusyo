@@ -493,12 +493,6 @@ def wait_list_item_disappear(driver, target_text, timeout=15):
 def dump_diagnostic(driver, label, work_item_xpath=None):
     """
     失敗時の診断情報をログ出力し、スクリーンショットとHTMLソースを保存する
-
-    引数:
-        driver, 診断ラベル, 対象XPath(任意)
-
-    返り値:
-        なし
     """
     try:
         url = driver.current_url
@@ -520,7 +514,6 @@ def dump_diagnostic(driver, label, work_item_xpath=None):
             count = f"(取得失敗: {e})"
         logger.error(f"[診断:{label}] work_item_xpath マッチ件数={count}")
 
-    # ページ内テキスト抜粋
     try:
         body_text = driver.find_element(By.TAG_NAME, "body").text
         excerpt = body_text[:500].replace("\n", " | ")
@@ -528,7 +521,6 @@ def dump_diagnostic(driver, label, work_item_xpath=None):
     except Exception as e:
         logger.error(f"[診断:{label}] ページテキスト取得失敗: {e}")
 
-    # ログイン画面に留まっているかの判別
     try:
         login_inputs = driver.find_elements(By.XPATH, "//input[@id='username']")
         if login_inputs:
@@ -538,7 +530,6 @@ def dump_diagnostic(driver, label, work_item_xpath=None):
     except Exception:
         pass
 
-    # スクリーンショット保存
     try:
         ts = time.strftime("%Y%m%d_%H%M%S")
         shot_path = os.path.join(
@@ -549,7 +540,6 @@ def dump_diagnostic(driver, label, work_item_xpath=None):
     except Exception as e:
         logger.error(f"[診断:{label}] スクリーンショット保存失敗: {e}")
 
-    # HTMLソース保存
     try:
         ts = time.strftime("%Y%m%d_%H%M%S")
         html_path = os.path.join(
@@ -571,12 +561,8 @@ def scraiping_smartdb(driver, base_url):
     SmartDBのスクレイピングをして情報(金額)を取得する処理
     """
 
-    # ★ プロジェクト直下の専用DLフォルダ（scraiping_data_create.py 側と同じパス）
-    download_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "downloads"
-    )
-    if not os.path.isdir(download_dir):
-        os.makedirs(download_dir, exist_ok=True)
+    # ★ ChromeのDL先はローカル一時ディレクトリ（Box同期フォルダを避ける。固定パス）
+    download_dir = util.get_download_dir()
 
     # ---------------------
     # XPath定義
@@ -610,7 +596,7 @@ def scraiping_smartdb(driver, base_url):
         "//*[@role='button' and normalize-space()='責任者承認']",
     ]
 
-    logger.info("SmartDB処理 START")
+    logger.info(f"SmartDB処理 START download_dir={download_dir}")
 
     # ----- ログイン -----
     wait_document_ready(driver)
@@ -734,10 +720,46 @@ def scraiping_smartdb(driver, base_url):
                 pdf_link_text = extract_element_text(pdf_link_element)
                 logger.info(f"PDFリンクを検出しました: {pdf_link_text}")
 
-                safe_click(driver, pdf_link_element, timeout=DEFAULT_TIMEOUT)
+                # ----- PDF取得：クリックDL → 失敗時はhref直接HTTP取得へフォールバック -----
+                pdf_href = None
+                try:
+                    pdf_href = pdf_link_element.get_attribute("href")
+                    if pdf_href:
+                        from urllib.parse import urljoin
+                        pdf_href = urljoin(driver.current_url, pdf_href)
+                except Exception:
+                    pdf_href = None
 
-                pdf_path = util.wait_new_pdf(download_dir, before_pdf_set, timeout=60)
-                logger.info(f"PDFダウンロード完了: {pdf_path}")
+                pdf_path = None
+                try:
+                    safe_click(driver, pdf_link_element, timeout=DEFAULT_TIMEOUT)
+                    pdf_path = util.wait_new_pdf(download_dir, before_pdf_set, timeout=60)
+                    logger.info(f"PDFダウンロード完了: {pdf_path}")
+                except Exception as e:
+                    logger.warning(f"クリックDLでPDFを検知できませんでした: {str(e)}")
+                    if not pdf_href:
+                        raise
+
+                    try:
+                        import requests
+                    except ImportError:
+                        logger.error("requests がインストールされていません。pip install requests を実行してください。")
+                        raise
+
+                    session = requests.Session()
+                    for c in driver.get_cookies():
+                        session.cookies.set(c["name"], c["value"], domain=c.get("domain"))
+                    resp = session.get(pdf_href, timeout=60, stream=True)
+                    resp.raise_for_status()
+
+                    fname = pdf_link_text.strip()
+                    if not fname.lower().endswith(".pdf"):
+                        fname = "download.pdf"
+                    pdf_path = os.path.join(download_dir, fname)
+                    with open(pdf_path, "wb") as f:
+                        for chunk in resp.iter_content(chunk_size=8192):
+                            f.write(chunk)
+                    logger.info(f"PDFダウンロード完了(フォールバック): {pdf_path}")
 
                 # pdfファイルから、合計金額・消費税・税抜金額を抽出
                 total_including_tax, consumption_tax, total_decluding_tax = generate_api.main(pdf_path)
@@ -876,8 +898,15 @@ def scraiping_smartdb(driver, base_url):
                         else:
                             logger.warning("一覧側で対象案件の状態変化を確認できませんでした。手動確認を推奨します。")
 
+                except NoSuchWindowException as e:
+                    logger.error(f"元ウィンドウへの復帰に失敗しました（全ウィンドウ消滅）: {str(e)}")
+                    return
                 except Exception as e:
                     logger.error(f"元ウィンドウへの復帰に失敗しました: {str(e)}")
+                    try:
+                        switch_to_alive_window(driver)
+                    except Exception:
+                        return
 
             logger.info(f"########## {target_text} 処理 END ##########")
 
@@ -889,7 +918,7 @@ def scraiping_smartdb(driver, base_url):
         # ----- iframeから抜ける（親画面に戻る） -----
         driver.switch_to.default_content()
         
-        # ----- 「次へ」ボタンを探す（一覧表示画面の中に「次へ」があれば実行してページネーション） -----
+        # ----- 「次へ」ボタンを探す -----
         next_buttons = driver.find_elements(By.XPATH, next_page_xpath)
 
         if not next_buttons:

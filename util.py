@@ -4,12 +4,13 @@ from selenium.webdriver.support.ui import Select
 import time
 import sys
 import re
+import os
+import tempfile
 import logger as logger
 import configparser
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
-
 
 
 
@@ -56,12 +57,31 @@ PROCEED_BUTTON =  ''
 EXE_MODE = config.get('exe_mode')
 
 
-# pdfダウンロードフォルダ
-DOWNLOAD_DIR = config.get('download_dir')
+# 旧定義（config.ini の download_dir）は使わない。ローカル一時ディレクトリ固定で上書き。
+# DOWNLOAD_DIR = config.get('download_dir')
 
 
 # イテレーション回数
 ITER_COUNT = int(config.get('iter_count'))
+
+
+def get_download_dir():
+    """
+    ChromeのDL先として使うローカル一時ディレクトリを返す。
+    Box同期フォルダなどネットワーク同期フォルダはファイル出現遅延・ファイルロックの
+    原因になるため、必ずローカル一時ディレクトリを使う（会社環境対応）。
+    """
+    base_dir = os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir()
+    base = os.path.join(base_dir, "smartdb_downloads")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    return base
+
+
+# ★ DOWNLOAD_DIR は get_download_dir() 経由でローカル一時ディレクトリ固定（Box同期パス排除）
+DOWNLOAD_DIR = get_download_dir()
 
 
 def link_click(driver, link_text, index):
@@ -141,7 +161,6 @@ def xpath_select(driver, xpath_text, var, index:int = 0):
 
     引数:
         Chromeドライバ、XPATH、入力文字、インデックス
-        複数エレメントを拾い出したときに、外から明示的に設定できるようにindexを追加
 
     返り値:
         成功: 0
@@ -205,7 +224,7 @@ def get_elements_xpath(driver, xpath_text):
 def popup_click(driver, f):
     """
     ポップアップ画面のボタンをクリックする処理
-
+    
     引数:
         Chromeドライバ
         フラグ： POPUP_ACCEPTの場合は「OK」、それ以外は「キャンセル」をクリック
@@ -399,7 +418,6 @@ def get_jst_time():
 
 
 
-
 def list_pdf_files(download_dir: str):
     """
     ダウンロードフォルダ内のPDFファイル名リストを取得する
@@ -453,28 +471,21 @@ def wait_new_pdf(download_dir: str, before_set: set, timeout: int = 60):
 
         new = sorted(after - before_set)
 
-        # 新規PDFが1つ以上見つかったら、ダウンロード完了しているか確認
         if new:
-            # ダウンロード中ファイル(.crdownload/.tmp)が残っていないことを確認
             partials = list(d.glob("*.crdownload")) + list(d.glob("*.tmp"))
-
             if not partials:
-                # サイズが安定するまで待つ（DL中のサイズ変動を誤検知しない）
                 for name in new:
                     p = d / name
                     try:
                         size = p.stat().st_size
                     except OSError:
                         continue
-
                     if size > 0 and last_size.get(name) == size:
                         return str(p)
-
                     last_size[name] = size
 
         time.sleep(0.5)
 
-    # タイムアウト時は監視先の一覧を例外メッセージに含めて自己診断できるようにする
     try:
         listing = [p.name for p in d.iterdir()]
     except Exception as e:
@@ -484,6 +495,7 @@ def wait_new_pdf(download_dir: str, before_set: set, timeout: int = 60):
         f"新規PDFのダウンロード完了を検知できませんでした "
         f"(監視先={download_dir} の一覧={listing})"
     )
+
 
 
 def delete_file(path: str):

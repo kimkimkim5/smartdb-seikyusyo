@@ -4,6 +4,7 @@ import logger as logger
 import util as util
 import subprocess
 import tempfile
+import os
 from scraiping_smartdb import scraiping_smartdb
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -40,8 +41,49 @@ def execute_sub(driver, url):
         options.add_argument("--no-default-browser-check")
         options.add_argument("--start-maximized")
 
+        # ★ ChromeのDL先はローカル一時ディレクトリ（Box同期フォルダを避ける）
+        download_dir = util.get_download_dir()
+        logger.info(f"DLフォルダ: {download_dir}")
+
+        # ★ Chrome prefs：DL先固定＋PDFはビューアで開かずファイル保存
+        prefs = {
+            "download.default_directory": download_dir,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "plugins.always_open_pdf_externally": True,  # PDFをビューアで開かずDLさせる
+            "safebrowsing.enabled": True,
+        }
+        options.add_experimental_option("prefs", prefs)
+
         service = Service(executable_path=util.CHROMEDRIVER_PATH)   
         driver = webdriver.Chrome(service=service, options=options)
+
+        # ★ 診断：Chrome / chromedriver バージョンとDL設定確認
+        try:
+            logger.info(f"Chrome version: {driver.capabilities.get('browserVersion')}")
+            logger.info(
+                f"chromedriver version: "
+                f"{driver.capabilities.get('chrome', {}).get('chromedriverVersion')}"
+            )
+        except Exception:
+            pass
+
+        # ★ CDPでもDL先を強制（prefsが効かない環境の保険）
+        try:
+            driver.execute_cdp_cmd("Browser.setDownloadBehavior", {
+                "behavior": "allow",
+                "downloadPath": download_dir,
+                "eventsEnabled": True,
+            })
+        except Exception:
+            try:
+                driver.execute_cdp_cmd("Page.setDownloadBehavior", {
+                    "behavior": "allow",
+                    "downloadPath": download_dir,
+                })
+            except Exception as e:
+                logger.warning(f"CDPダウンロード設定に失敗: {e}")
+
         driver.get(url)
         scraiping_smartdb(driver, url)
 
